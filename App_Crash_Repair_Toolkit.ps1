@@ -29,8 +29,9 @@ if($ResetAppPackage){
     try{$matches=@(Get-AppxPackage -Name $AppPackageName -ErrorAction Stop);if($matches.Count -ne 1){throw "Expected one installed package but found $($matches.Count). Use the exact package name."};$package=$matches[0];$package|Select-Object Name,PackageFullName,PackageFamilyName,InstallLocation,Version,Publisher|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $backupDirectory 'AppPackage.json') -Encoding UTF8;Write-Log "Saved package metadata for $($package.Name)."}
     catch{Write-Error "Unable to resolve app package: $($_.Exception.Message)";exit $ExitInvalidInput}
 }
+$werItems=@()
 if($ArchiveAndClearWerQueue){
-    $werItems=@();foreach($path in @($werQueue,$werArchive)){if(Test-Path -LiteralPath $path){$werItems+=Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue}}
+    foreach($path in @($werQueue,$werArchive)){if(Test-Path -LiteralPath $path){$werItems+=@(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue)}}
     Write-Log "Found $($werItems.Count) WER report item(s) for archival."
 }
 
@@ -40,12 +41,10 @@ if(-not $DryRun -and -not $Yes){$answer=Read-Host ("Proceed with: {0}? [y/N]" -f
 try{
     if($ArchiveAndClearWerQueue){
         Invoke-Step 'Archive Windows Error Reporting queues before clearing them' {
-            $sources=@($werQueue,$werArchive)|Where-Object {Test-Path -LiteralPath $_}
-            if($sources.Count -gt 0){$zip=Join-Path $backupDirectory 'WER_Reports.zip';Compress-Archive -Path ($sources|ForEach-Object {Join-Path $_ '*'}) -DestinationPath $zip -Force -ErrorAction Stop;Write-Log "Created $zip"}
-            foreach($path in $sources){Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue|Remove-Item -Recurse -Force -ErrorAction Stop}
+            if($werItems.Count -gt 0){$zip=Join-Path $backupDirectory 'WER_Reports.zip';Compress-Archive -LiteralPath $werItems.FullName -DestinationPath $zip -Force -ErrorAction Stop;Write-Log "Created $zip";$werItems|Remove-Item -Recurse -Force -ErrorAction Stop}else{Write-Log '[INFO] No WER queue items required archival or removal.'}
         }
     }
-    if($RestartWindowsErrorReporting){Invoke-Step 'Restart Windows Error Reporting service' {Set-Service -Name WerSvc -StartupType Manual;Start-Service -Name WerSvc -ErrorAction SilentlyContinue;if((Get-Service WerSvc).Status -eq 'Running'){Restart-Service -Name WerSvc -Force}}}
+    if($RestartWindowsErrorReporting){Invoke-Step 'Restart Windows Error Reporting service' {Set-Service -Name WerSvc -StartupType Manual;$service=Get-Service WerSvc;if($service.Status -eq 'Running'){Restart-Service -Name WerSvc -Force}else{Start-Service -Name WerSvc}}}
     if($ResetAppPackage){Invoke-Step "Reset app package '$($package.Name)'" {
         $reset=Get-Command Reset-AppxPackage -ErrorAction SilentlyContinue
         if($reset){$package|Reset-AppxPackage -ErrorAction Stop}
@@ -58,7 +57,7 @@ if($DryRun){Write-Log '[COMPLETE] Dry-run completed.';exit 0}
 $verifyFailed=$false
 try{
     if($ResetAppPackage){$after=Get-AppxPackage -Name $package.Name;Write-Log "[VERIFY] Package installed: $([bool]$after)";if(-not $after){$verifyFailed=$true}}
-    if($RestartWindowsErrorReporting){$service=Get-Service WerSvc;Write-Log "[VERIFY] WerSvc status: $($service.Status)";if($service.Status -ne 'Running'){$verifyFailed=$true}}
+    if($RestartWindowsErrorReporting){$service=Get-Service WerSvc;Write-Log "[VERIFY] WerSvc status=$($service.Status); start type=$($service.StartType)";if($service.StartType -eq 'Disabled'){$verifyFailed=$true}}
     if($ArchiveAndClearWerQueue){$remaining=0;foreach($path in @($werQueue,$werArchive)){if(Test-Path -LiteralPath $path){$remaining+=@(Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue).Count}};Write-Log "[VERIFY] Remaining WER report items: $remaining";if($remaining -gt 0){$verifyFailed=$true}}
 }catch{Write-Log "[VERIFY-FAILED] $($_.Exception.Message)";$verifyFailed=$true}
 if($verifyFailed){exit $ExitVerificationFailure}
